@@ -4,10 +4,8 @@
  */
 package main
 
+import "time"
+
 func main() {
-	m := map[int]*[]int{}
-	m[0] = &[]int{1, 2}
-	v, _ := m[0]
-	*v = append(*v, 9)
-	println(*m[0])
+	println(time.Now().Unix())
 }
