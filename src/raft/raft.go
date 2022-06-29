@@ -314,9 +314,48 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 //
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	return ok
+func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, ch chan int) {
+	reply := RequestVoteReply{}
+	ok := rf.peers[server].Call("Raft.RequestVote", args, &reply)
+	if ok {
+		rf.Log(2, "sendRequestVote("+strconv.Itoa(rf.me)+"): get("+strconv.Itoa(server)+")'s vote response")
+		if rf.currentTermMutex.Lock(); reply.Term > rf.currentTerm {
+			rf.Log(2, "sendRequestVote("+strconv.Itoa(rf.me)+"): follow to("+strconv.Itoa(server)+")")
+			// currentTerm < term
+			rf.currentStateMutex.Lock()
+			rf.votedForMutex.Lock()
+			// be follower
+			rf.currentTerm = reply.Term
+			// change state to Follower
+			rf.currentState = Follower
+			// change votedFor
+			rf.votedFor = server
+			rf.votedForMutex.Unlock()
+			rf.currentStateMutex.Unlock()
+			rf.currentTermMutex.Unlock()
+			// change heartbeat time
+			rf.electionTimerMutex.Lock()
+			rf.electionTimer = time.Now().UnixMilli()
+			rf.electionTimerMutex.Unlock()
+			//
+			ch <- 0
+		} else {
+			rf.currentTermMutex.Unlock()
+			if reply.VoteGranted {
+				// get vote
+				ch <- 1
+				rf.Log(2, "sendRequestVote("+strconv.Itoa(rf.me)+"): get-vote-success("+strconv.Itoa(server)+")")
+			} else {
+				// not get vote
+				ch <- 0
+				rf.Log(2, "sendRequestVote("+strconv.Itoa(rf.me)+"): get-vote-fail("+strconv.Itoa(server)+")")
+			}
+		}
+	} else {
+		rf.Log(2, "sendRequestVote("+strconv.Itoa(rf.me)+"): get-no("+strconv.Itoa(server)+")'s vote response")
+		ch <- 0
+	}
+	return
 }
 
 //
@@ -489,14 +528,14 @@ func (rf *Raft) HeartBeat() {
 //
 // election
 // result: true for success, false for fail or not a candidate
-func (rf *Raft) election() bool {
+func (rf *Raft) election() {
 	rf.currentTermMutex.Lock()
 	rf.currentStateMutex.Lock()
 	if rf.currentState != Candidate {
 		// term changed
 		rf.currentStateMutex.Unlock()
 		rf.currentTermMutex.Unlock()
-		return true
+		return
 	}
 	rf.votedForMutex.Lock()
 	// increment term & get current term
@@ -521,11 +560,8 @@ func (rf *Raft) election() bool {
 		LastLogIndex: 0, // TODO
 		LastLogTerm:  0, // TODO
 	}
-	reply := RequestVoteReply{}
-
-	currentVotesCount := 1
-
-	// ask for others' vote.
+	ch := make(chan int)
+	// start sendRequestVote goRoutine
 	for id, _ := range rf.peers {
 		if id == rf.me {
 			// don't need to vote for myself.
@@ -533,59 +569,35 @@ func (rf *Raft) election() bool {
 		}
 		// request for vote
 		rf.Log(2, "election("+strconv.Itoa(rf.me)+"): request("+strconv.Itoa(id)+") for vote")
-		ok := rf.sendRequestVote(id, &request, &reply)
-		if ok {
-			rf.Log(2, "election("+strconv.Itoa(rf.me)+"): get("+strconv.Itoa(id)+")'s vote response")
-			if rf.currentTermMutex.Lock(); reply.Term > rf.currentTerm {
-				rf.Log(2, "election("+strconv.Itoa(rf.me)+"): follow to("+strconv.Itoa(id)+")")
-				// currentTerm < term
-				rf.currentStateMutex.Lock()
-				rf.votedForMutex.Lock()
-				// be follower
-				rf.currentTerm = reply.Term
-				// change state to Follower
-				rf.currentState = Follower
-				// change votedFor
-				rf.votedFor = id
-				rf.votedForMutex.Unlock()
-				rf.currentStateMutex.Unlock()
-				rf.currentTermMutex.Unlock()
-				// change heartbeat time
-				rf.electionTimerMutex.Lock()
-				rf.electionTimer = time.Now().UnixMilli()
-				rf.electionTimerMutex.Unlock()
-				return true
-			} else {
-				rf.currentTermMutex.Unlock()
-			}
+		go rf.sendRequestVote(id, &request, ch)
+	}
+	currentVotesCount := 1
+	finishThreadCount := 0
+	// wait for answer
+	for ok := range ch {
+		finishThreadCount += 1
+		if ok == 1 {
+			currentVotesCount += 1
+			rf.Log(1, "election("+strconv.Itoa(rf.me)+"): total-vote("+strconv.Itoa(currentVotesCount)+")")
+		}
+		if currentVotesCount > len(rf.peers)/2 {
+			// log
+			rf.Log(1, "election("+strconv.Itoa(rf.me)+"): be leader; term("+strconv.Itoa(term)+")")
+			// be leader
+			// change state
+			rf.currentStateMutex.Lock()
+			rf.currentState = Leader
+			rf.currentStateMutex.Unlock()
 
-			if reply.VoteGranted {
-				// get vote
-				currentVotesCount += 1
-				rf.Log(2, "election("+strconv.Itoa(rf.me)+"): get-vote-success("+strconv.Itoa(id)+"); total votes("+strconv.Itoa(currentVotesCount)+")")
-			} else {
-				// not get vote
-				rf.Log(2, "election("+strconv.Itoa(rf.me)+"): get-vote-fail("+strconv.Itoa(id)+"), total votes("+strconv.Itoa(currentVotesCount)+")")
-			}
-		} else {
-			rf.Log(2, "election("+strconv.Itoa(rf.me)+"): get-no("+strconv.Itoa(id)+")'s vote response")
+			// start heartbeat go routine
+			go rf.HeartBeat()
+			break
+		}
+		if finishThreadCount == len(rf.peers)-1 {
+			break
 		}
 	}
-	if currentVotesCount > len(rf.peers)/2 {
-		// log
-		rf.Log(1, "election("+strconv.Itoa(rf.me)+"): be leader; term("+strconv.Itoa(term)+")")
-		// be leader
-		// change state
-		rf.currentStateMutex.Lock()
-		rf.currentState = Leader
-		rf.currentStateMutex.Unlock()
 
-		// start heartbeat go routine
-		go rf.HeartBeat()
-		return true
-	} else {
-		return false
-	}
 }
 
 // AppendEntries
