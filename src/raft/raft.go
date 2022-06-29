@@ -94,10 +94,10 @@ type Raft struct {
 	// state a Raft server must maintain.
 	timeout time.Duration // rand timeout: (from 800 to 1000ms)
 	//electionTimeInterval  time.Duration
-	heartBeatTimeInterval time.Duration // default: (150ms)
-	lastHeartBeatTime     int64
-	verbose               int
-	isPeersLive           []int64
+	heartBeatInterval time.Duration // default: (150ms)
+	electionTimer     int64
+	verbose           int
+	isPeersLive       []int64
 
 	currentTermMutex sync.Mutex
 	currentTerm      int // current term.
@@ -111,8 +111,8 @@ type Raft struct {
 	currentStateMutex sync.Mutex
 	currentState      State
 
-	lastHeartBeatTimeMutex sync.Mutex
-	isPeersLiveMutex       sync.Mutex
+	electionTimerMutex sync.Mutex
+	isPeersLiveMutex   sync.Mutex
 }
 
 //
@@ -227,48 +227,49 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	// currentTerm < term
 	if rf.currentTermMutex.Lock(); rf.currentTerm < args.Term {
-		rf.Log(2, "RequestVote("+strconv.Itoa(rf.me)+"): currentTerm("+
-			strconv.Itoa(rf.currentTerm)+") < term("+strconv.Itoa(args.Term)+") from peer("+strconv.Itoa(args.CandidateId)+")")
+		rf.Log(2, "RequestVote("+strconv.Itoa(rf.me)+"): currentTerm("+strconv.Itoa(rf.currentTerm)+") < term("+strconv.Itoa(args.Term)+") from peer("+strconv.Itoa(args.CandidateId)+")")
 		rf.currentStateMutex.Lock()
 		rf.votedForMutex.Lock()
 		// set term
 		rf.currentTerm = args.Term
 		// change state
 		rf.currentState = Follower
-		// vote for this peer
-		reply.VoteGranted = true
 		// vote for
 		rf.votedFor = args.CandidateId
 		rf.votedForMutex.Unlock()
 		rf.currentStateMutex.Unlock()
 		rf.currentTermMutex.Unlock()
 		// reset heartbeat timer
-		rf.lastHeartBeatTimeMutex.Lock()
-		rf.lastHeartBeatTime = time.Now().UnixMilli()
-		rf.lastHeartBeatTimeMutex.Unlock()
+		rf.electionTimerMutex.Lock()
+		rf.electionTimer = time.Now().UnixMilli()
+		rf.electionTimerMutex.Unlock()
 		reply.Term = args.Term
-	} else if rf.currentTerm == args.Term {
-		rf.Log(2, "RequestVote("+strconv.Itoa(rf.me)+"): currentTerm("+
-			strconv.Itoa(rf.currentTerm)+") = term("+strconv.Itoa(args.Term)+") from peer("+strconv.Itoa(args.CandidateId)+")")
-		rf.currentStateMutex.Lock()
-		rf.votedForMutex.Lock()
 		// vote for this peer
-		if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
-			reply.VoteGranted = true
-			// change state
-			rf.currentState = Follower
-			// vote for
-			rf.votedFor = args.CandidateId
-			rf.votedForMutex.Unlock()
-			rf.currentStateMutex.Unlock()
-			rf.currentTermMutex.Unlock()
-			// reset heartbeat timer
-			rf.lastHeartBeatTimeMutex.Lock()
-			rf.lastHeartBeatTime = time.Now().UnixMilli()
-			rf.lastHeartBeatTimeMutex.Unlock()
+		reply.VoteGranted = true
+	} else if rf.currentTerm == args.Term {
+		rf.Log(2, "RequestVote("+strconv.Itoa(rf.me)+"): currentTerm("+strconv.Itoa(rf.currentTerm)+") = term("+strconv.Itoa(args.Term)+") from peer("+strconv.Itoa(args.CandidateId)+")")
+		rf.currentStateMutex.Lock()
+		if rf.currentState == Follower {
+			// vote for this peer
+			rf.votedForMutex.Lock()
+			if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
+				reply.VoteGranted = true
+				// vote for
+				rf.votedFor = args.CandidateId
+				rf.votedForMutex.Unlock()
+				rf.currentStateMutex.Unlock()
+				rf.currentTermMutex.Unlock()
+				// reset election timer
+				rf.electionTimerMutex.Lock()
+				rf.electionTimer = time.Now().UnixMilli()
+				rf.electionTimerMutex.Unlock()
+			} else {
+				reply.VoteGranted = false
+				rf.votedForMutex.Unlock()
+				rf.currentStateMutex.Unlock()
+				rf.currentTermMutex.Unlock()
+			}
 		} else {
-			reply.VoteGranted = false
-			rf.votedForMutex.Unlock()
 			rf.currentStateMutex.Unlock()
 			rf.currentTermMutex.Unlock()
 		}
@@ -356,6 +357,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // should call killed() to check whether it should stop.
 //
 func (rf *Raft) Kill() {
+	rf.Log(1, "Killed("+strconv.Itoa(rf.me)+")")
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
 }
@@ -377,135 +379,110 @@ func (rf *Raft) ticker() {
 		// be started and to randomize sleeping time using
 		// time.Sleep().
 
-		rf.currentStateMutex.Lock()
-		state := rf.currentState
-		rf.currentStateMutex.Unlock()
-
-		isTimeout := false
-		if state == Follower || state == Candidate {
-			rf.lastHeartBeatTimeMutex.Lock()
-			lastHeartBeatTime := rf.lastHeartBeatTime
-			rf.lastHeartBeatTimeMutex.Unlock()
-			isTimeout = time.Now().UnixMilli()-lastHeartBeatTime > int64(rf.heartBeatTimeInterval)
-		} else {
-			rf.isPeersLiveMutex.Lock()
-			count := 1
-			timenow := time.Now().UnixMilli()
-			for i, peer := range rf.isPeersLive {
-				if i != rf.me && timenow-peer <= int64(rf.heartBeatTimeInterval) {
-					count += 1
-				}
-			}
-			rf.isPeersLiveMutex.Unlock()
-			if count > len(rf.peers)/2 {
-				// not time out
-				isTimeout = false
-			} else {
-				// time out
-				isTimeout = true
-			}
-		}
-
-		if isTimeout {
+		rf.electionTimerMutex.Lock()
+		if time.Now().UnixMilli()-rf.electionTimer > int64(rf.timeout) {
+			// timeout
+			rf.electionTimerMutex.Unlock()
 			// log
 			rf.currentTermMutex.Lock()
-			rf.Log(1, "ticker("+strconv.Itoa(rf.me)+"): timeout, state: "+string(state)+"; term: "+strconv.Itoa(rf.currentTerm))
-			rf.currentTermMutex.Unlock()
-			// timeout
-			if state == Follower || state == Leader {
+			rf.currentStateMutex.Lock()
+			if rf.currentState == Follower || rf.currentState == Candidate {
+				rf.Log(1, "ticker("+strconv.Itoa(rf.me)+"): timeout, state: "+string(rf.currentState)+"; term: "+strconv.Itoa(rf.currentTerm))
 				// change state
-				rf.currentStateMutex.Lock()
 				rf.currentState = Candidate
 				rf.currentStateMutex.Unlock()
-
+				rf.currentTermMutex.Unlock()
 				// start election
-				rf.election()
-			} else if state == Candidate {
-				// start election
-				rf.election()
+				go rf.election()
+			} else {
+				rf.currentStateMutex.Unlock()
+				rf.currentTermMutex.Unlock()
 			}
+		} else {
+			rf.electionTimerMutex.Unlock()
 		}
 		// sleep a rand timeout
-		time.Sleep(rf.timeout * time.Millisecond)
+		time.Sleep(rf.timeout / 2 * time.Millisecond)
 	}
 	time.Sleep(time.Second)
 }
 
 // The heartBeat go routine will send heartbeat periodically
-func (rf *Raft) sendHeartBeat() {
-	// log
-	rf.Log(1, "sendHeartBeat("+strconv.Itoa(rf.me)+"): start")
-	for !rf.killed() {
-		rf.currentStateMutex.Lock()
-		state := rf.currentState
-		rf.currentStateMutex.Unlock()
-		if state == Leader {
-			// log
-			rf.Log(1, "sendHearBeat("+strconv.Itoa(rf.me)+"): loop")
-			// start send heartbeat
-			rf.currentTermMutex.Lock()
-			request := AppendEntries{
-				Term:         rf.currentTerm,
-				LeaderId:     rf.me,
-				PrevLogIndex: 0,       // TODO
-				PrevLogTerm:  0,       // TODO
-				Entries:      []int{}, // TODO
-				LeaderCommit: 0,       // TODO
+func (rf *Raft) sendAppendEntries(term int) {
+	rf.Log(1, "sendAppendEntries("+strconv.Itoa(rf.me)+"): Start")
+	// start send heartbeat
+	request := AppendEntries{
+		Term:         term,
+		LeaderId:     rf.me,
+		PrevLogIndex: 0,       // TODO
+		PrevLogTerm:  0,       // TODO
+		Entries:      []int{}, // TODO
+		LeaderCommit: 0,       // TODO
+	}
+	reply := AppendEntriesReply{}
+	for i, peer := range rf.peers {
+		if i == rf.me {
+			// do not need to send Heartbeat to self.
+			continue
+		}
+		ok := peer.Call("Raft.AppendEntries", &request, &reply)
+		if ok {
+			// currentTerm < term
+			if rf.currentTermMutex.Lock(); rf.currentTerm < reply.Term {
+				rf.currentStateMutex.Lock()
+				rf.votedForMutex.Lock()
+				rf.currentTerm = reply.Term
+				rf.currentState = Follower
+				rf.votedFor = i
+				rf.votedForMutex.Unlock()
+				rf.currentStateMutex.Unlock()
+				rf.currentTermMutex.Unlock()
+				// set election timer
+				rf.electionTimerMutex.Lock()
+				rf.electionTimer = time.Now().UnixMilli()
+				rf.electionTimerMutex.Unlock()
+				// log
+				rf.Log(2, "sendAppendEntries("+strconv.Itoa(rf.me)+"): peer("+strconv.Itoa(i)+"), term-over: find big term peer.")
+				return
+			} else {
+				rf.currentTermMutex.Unlock()
 			}
-			rf.currentTermMutex.Unlock()
 
-			reply := AppendEntriesReply{}
-			for i, peer := range rf.peers {
-				if i == rf.me {
-					// do not need to send Heartbeat to self.
-					continue
-				}
-				ok := peer.Call("Raft.AppendEntries", &request, &reply)
-				if ok {
-					rf.currentTermMutex.Lock()
-					// currentTerm < term
-					if rf.currentTerm < reply.Term {
-						rf.currentStateMutex.Lock()
-						rf.votedForMutex.Lock()
-						rf.currentTerm = reply.Term
-						rf.currentState = Follower
-						rf.votedFor = i
-						rf.votedForMutex.Unlock()
-						rf.currentStateMutex.Unlock()
-						rf.currentTermMutex.Unlock()
-						// set last time
-						rf.lastHeartBeatTimeMutex.Lock()
-						rf.lastElectionTime = time.Now().UnixMilli()
-						rf.lastHeartBeatTimeMutex.Unlock()
-						// log
-						rf.Log(2, "sendHeartBeat("+strconv.Itoa(rf.me)+"): peer("+strconv.Itoa(i)+"), term-over: find big term peer.")
-						return
-					} else {
-						rf.currentTermMutex.Unlock()
-
-						rf.isPeersLiveMutex.Lock()
-						// set last time
-						rf.isPeersLive[i] = time.Now().UnixMilli()
-						rf.isPeersLiveMutex.Unlock()
-					}
-
-					// success
-					if reply.Success == 1 {
-						// log
-						rf.Log(2, "sendHeartBeat("+strconv.Itoa(rf.me)+"): peer("+strconv.Itoa(i)+"), success")
-						// do something
-					} else {
-						// log
-						rf.Log(2, "sendHeartBeat("+strconv.Itoa(rf.me)+"): peer("+strconv.Itoa(i)+"), fail")
-					}
-				} else {
-					rf.Log(2, "sendHeartBeat("+strconv.Itoa(rf.me)+"): peer("+strconv.Itoa(i)+"), no-response")
-				}
+			// success
+			if reply.Success == 1 {
+				// log
+				rf.Log(2, "sendAppendEntries("+strconv.Itoa(rf.me)+"): peer("+strconv.Itoa(i)+"), success")
+				// do something
+				// fail
+			} else {
+				// log
+				rf.Log(2, "sendAppendEntries("+strconv.Itoa(rf.me)+"): peer("+strconv.Itoa(i)+"), fail")
 			}
 		} else {
+			rf.Log(2, "sendAppendEntries("+strconv.Itoa(rf.me)+"): peer("+strconv.Itoa(i)+"), no-response")
+		}
+	}
+}
+
+func (rf *Raft) HeartBeat() {
+	// log
+	rf.Log(1, "HeartBeat("+strconv.Itoa(rf.me)+"): Start")
+	for !rf.killed() {
+		rf.Log(3, "HeartBeat("+strconv.Itoa(rf.me)+"): Loop")
+		rf.currentTermMutex.Lock()
+		rf.currentStateMutex.Lock()
+		if rf.currentState == Leader {
+			term := rf.currentTerm
+			rf.currentStateMutex.Unlock()
+			rf.currentTermMutex.Unlock()
+			// send AppendEntries
+			go rf.sendAppendEntries(term)
+		} else {
+			rf.currentStateMutex.Unlock()
+			rf.currentTermMutex.Unlock()
 			break
 		}
-		time.Sleep(rf.heartBeatTimeInterval * time.Millisecond)
+		time.Sleep(rf.heartBeatInterval * time.Millisecond)
 	}
 }
 
@@ -515,6 +492,12 @@ func (rf *Raft) sendHeartBeat() {
 func (rf *Raft) election() bool {
 	rf.currentTermMutex.Lock()
 	rf.currentStateMutex.Lock()
+	if rf.currentState != Candidate {
+		// term changed
+		rf.currentStateMutex.Unlock()
+		rf.currentTermMutex.Unlock()
+		return true
+	}
 	rf.votedForMutex.Lock()
 	// increment term & get current term
 	rf.currentTerm += 1
@@ -526,7 +509,10 @@ func (rf *Raft) election() bool {
 	rf.votedForMutex.Unlock()
 	rf.currentStateMutex.Unlock()
 	rf.currentTermMutex.Unlock()
-
+	// reset election timer
+	rf.electionTimerMutex.Lock()
+	rf.electionTimer = time.Now().UnixMilli()
+	rf.electionTimerMutex.Unlock()
 	rf.Log(1, "election("+strconv.Itoa(rf.me)+"): start; state: "+string(state)+"; term: "+strconv.Itoa(term))
 
 	request := RequestVoteArgs{
@@ -538,43 +524,48 @@ func (rf *Raft) election() bool {
 	reply := RequestVoteReply{}
 
 	currentVotesCount := 1
+
 	// ask for others' vote.
 	for id, _ := range rf.peers {
 		if id == rf.me {
 			// don't need to vote for myself.
 			continue
 		}
-
 		// request for vote
-		// log
 		rf.Log(2, "election("+strconv.Itoa(rf.me)+"): request("+strconv.Itoa(id)+") for vote")
 		ok := rf.sendRequestVote(id, &request, &reply)
 		if ok {
 			rf.Log(2, "election("+strconv.Itoa(rf.me)+"): get("+strconv.Itoa(id)+")'s vote response")
+			if rf.currentTermMutex.Lock(); reply.Term > rf.currentTerm {
+				rf.Log(2, "election("+strconv.Itoa(rf.me)+"): follow to("+strconv.Itoa(id)+")")
+				// currentTerm < term
+				rf.currentStateMutex.Lock()
+				rf.votedForMutex.Lock()
+				// be follower
+				rf.currentTerm = reply.Term
+				// change state to Follower
+				rf.currentState = Follower
+				// change votedFor
+				rf.votedFor = id
+				rf.votedForMutex.Unlock()
+				rf.currentStateMutex.Unlock()
+				rf.currentTermMutex.Unlock()
+				// change heartbeat time
+				rf.electionTimerMutex.Lock()
+				rf.electionTimer = time.Now().UnixMilli()
+				rf.electionTimerMutex.Unlock()
+				return true
+			} else {
+				rf.currentTermMutex.Unlock()
+			}
+
 			if reply.VoteGranted {
 				// get vote
 				currentVotesCount += 1
-				// log
-				rf.Log(2, "election("+strconv.Itoa(rf.me)+"): get-vote("+strconv.Itoa(id)+"); total votes("+strconv.Itoa(currentVotesCount)+")")
+				rf.Log(2, "election("+strconv.Itoa(rf.me)+"): get-vote-success("+strconv.Itoa(id)+"); total votes("+strconv.Itoa(currentVotesCount)+")")
 			} else {
 				// not get vote
-				// log
 				rf.Log(2, "election("+strconv.Itoa(rf.me)+"): get-vote-fail("+strconv.Itoa(id)+"), total votes("+strconv.Itoa(currentVotesCount)+")")
-				if reply.Term > term {
-					rf.currentTermMutex.Lock()
-					rf.currentStateMutex.Lock()
-					rf.votedForMutex.Lock()
-					// be follower
-					rf.currentTerm = reply.Term
-					// change state to Follower
-					rf.currentState = Follower
-					// change votedFor
-					rf.votedFor = id
-					rf.votedForMutex.Unlock()
-					rf.currentStateMutex.Unlock()
-					rf.currentTermMutex.Unlock()
-					return true
-				}
 			}
 		} else {
 			rf.Log(2, "election("+strconv.Itoa(rf.me)+"): get-no("+strconv.Itoa(id)+")'s vote response")
@@ -589,13 +580,8 @@ func (rf *Raft) election() bool {
 		rf.currentState = Leader
 		rf.currentStateMutex.Unlock()
 
-		// change heartbeat time
-		rf.lastHeartBeatTimeMutex.Lock()
-		rf.lastHeartBeatTime = time.Now().UnixMilli()
-		rf.lastHeartBeatTimeMutex.Unlock()
-
 		// start heartbeat go routine
-		go rf.sendHeartBeat()
+		go rf.HeartBeat()
 		return true
 	} else {
 		return false
@@ -605,10 +591,8 @@ func (rf *Raft) election() bool {
 // AppendEntries
 // AppendEntries RPC handler
 func (rf *Raft) AppendEntries(args *AppendEntries, reply *AppendEntriesReply) {
-	rf.currentTermMutex.Lock()
-	if rf.currentTerm < args.Term {
+	if rf.currentTermMutex.Lock(); rf.currentTerm < args.Term {
 		// if currentTerm < term
-
 		rf.currentStateMutex.Lock()
 		rf.votedForMutex.Lock()
 		// change currentTerm
@@ -621,32 +605,31 @@ func (rf *Raft) AppendEntries(args *AppendEntries, reply *AppendEntriesReply) {
 		rf.currentStateMutex.Unlock()
 		rf.currentTermMutex.Unlock()
 
-		// reset heartbeat time
-		rf.lastHeartBeatTimeMutex.Lock()
-		rf.lastHeartBeatTime = time.Now().UnixMilli()
-		rf.lastHeartBeatTimeMutex.Unlock()
+		// reset election timer
+		rf.electionTimerMutex.Lock()
+		rf.electionTimer = time.Now().UnixMilli()
+		rf.electionTimerMutex.Unlock()
 		// reply
 		reply.Term = args.Term
 	} else if rf.currentTerm == args.Term {
 		rf.currentStateMutex.Lock()
-		state := rf.currentState
-
-		switch state {
+		switch rf.currentState {
 		case Follower:
-			rf.currentStateMutex.Unlock()
-			rf.currentTermMutex.Unlock()
 			// do something
 			rf.votedForMutex.Lock()
 			if rf.votedFor == args.LeaderId {
 				rf.votedForMutex.Unlock()
+				rf.currentStateMutex.Unlock()
+				rf.currentTermMutex.Unlock()
 				// reset heartbeat time
-				rf.lastHeartBeatTimeMutex.Lock()
-				rf.lastHeartBeatTime = time.Now().UnixMilli()
-				rf.lastHeartBeatTimeMutex.Unlock()
+				rf.electionTimerMutex.Lock()
+				rf.electionTimer = time.Now().UnixMilli()
+				rf.electionTimerMutex.Unlock()
 			} else {
 				rf.votedForMutex.Unlock()
+				rf.currentStateMutex.Unlock()
+				rf.currentTermMutex.Unlock()
 			}
-
 		case Candidate:
 			rf.votedForMutex.Lock()
 			// change to Follower
@@ -658,13 +641,16 @@ func (rf *Raft) AppendEntries(args *AppendEntries, reply *AppendEntriesReply) {
 			rf.currentTermMutex.Unlock()
 
 			// reset heartbeat time
-			rf.lastHeartBeatTimeMutex.Lock()
-			rf.lastHeartBeatTime = time.Now().UnixMilli()
-			rf.lastHeartBeatTimeMutex.Unlock()
+			rf.electionTimerMutex.Lock()
+			rf.electionTimer = time.Now().UnixMilli()
+			rf.electionTimerMutex.Unlock()
+		default:
+			rf.currentStateMutex.Unlock()
+			rf.currentTermMutex.Unlock()
 		}
-
 		reply.Term = args.Term
 	} else {
+		reply.Success = 0
 		reply.Term = rf.currentTerm
 		rf.currentTermMutex.Unlock()
 	}
@@ -689,12 +675,12 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
-	rf.heartBeatTimeInterval = 150
-	rf.timeout = time.Duration((40 + rand.Intn(10)) * 20)
+	rf.heartBeatInterval = 200
+	rf.timeout = time.Duration(800 + rand.Int()%200)
 	rf.verbose = getVerbosity()
 	rf.currentState = Follower
 	rf.votedFor = -1
-	rf.lastHeartBeatTime = 0
+	rf.electionTimer = 0
 	rf.isPeersLive = make([]int64, len(peers))
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
