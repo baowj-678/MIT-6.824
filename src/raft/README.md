@@ -82,9 +82,30 @@ Raft的作者在其博士论文《[CONSENSUS: BRIDGING THEORY AND PRACTICE](http
 3. up-to-date：最后一个**log的Term大的server更up-to-date**，否则如果term一样，则**log长度长的更up-to-date**。
 4. 原文中提到**convert to follower**，只是将**currentState**转为**Follower**，只要把**votedFor**设为**-1**，**不需要为该server投票**。
 
+### 5. Figure 8[不能提交小于currentTerm的log]
+Raft论文在Figure 8(下图)介绍了原因：
+![](./.md/Figure%208.png)
+(a). S1是term(2)的Leader[S2,S3,S4,S5投票]，但在写完S1和S2的log后就挂了；
 
+(b). S5是term(3)的Leader[S3,S4投票]，但在写完S5的log后就挂了；
+
+(c). 【错误情况】S1是term(4)的Leader[S2,S3,S4投票]，在复制并commit term(2)的log【小于当前term】，以及写完S1的term(4)log后挂了；
+
+(d). 【错误情况】此时S5是term(5)Leader[S2,S3,S4投票]，复制并commit term(3)的log【等于当前term】；
+cd出现的问题是**index(2) commit了两次log，分别是term(2)和term(3)**，这违背了**Raft**基本假设。
+
+(e). 【正常情况】c中的Leader commit term(4)【当前term】的日志。
+
+6. Follower的AppendEntries RPC响应中：不要直接用切片的方式追加所以的日志，因为由于网络问题**网络包的达到顺序可能不同**（例如：append index=34的包可能比append index=33的包先到达），这样有可能not up-to-date的日志会覆盖掉up-to-date的日志；
+
+7. Follower的AppendEntries RPC响应中：在追加日志时，有些Follower日志中最后的CommandTerm < Leader日志的最后CommandTerm，需要直接追加所有的entries；
+
+8. Follower的AppendEntries RPC响应中：如果发现冲突entry，需要删除该entry以及之后的所以entry；
+
+9. election中，Candidate收到RequestVote Reply后要**确认Term没有发生改变**（在发送RequestVote到收到Reply这段时间，Term可能发生改变）后才可以变为Leader；
 
 ## 问题
+[常见问题](https://thesquareplanet.com/blog/students-guide-to-raft/)
 1. 如果某个peer失联了，该peer term很大，恰好又增加了新log，那该peer重新加入后不就会被选为Leader，从而覆盖掉其他peer的正确log？
 
    个人理解：如果失联的peer是Follower，那么该Follower不会成为Leader，所以无法追加日志；如果该peer是Leader，失联后该Leader的term不会增加，相反其他Follower的term会增加从而选出新的Leader。
