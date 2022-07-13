@@ -104,6 +104,7 @@ cd出现的问题是**index(2) commit了两次log，分别是term(2)和term(3)**
 
 9. election中，Candidate收到RequestVote Reply后要**确认Term没有发生改变**（在发送RequestVote到收到Reply这段时间，Term可能发生改变）后才可以变为Leader；
 
+10. mutex和channel死锁 TODO
 ## 问题
 [常见问题](https://thesquareplanet.com/blog/students-guide-to-raft/)
 1. 如果某个peer失联了，该peer term很大，恰好又增加了新log，那该peer重新加入后不就会被选为Leader，从而覆盖掉其他peer的正确log？

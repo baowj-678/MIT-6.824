@@ -22,6 +22,7 @@ import (
 	"bytes"
 	"log"
 	"math/rand"
+	"os"
 	"sort"
 	"strconv"
 
@@ -96,12 +97,13 @@ type LogEntry struct {
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
-	mu        sync.Mutex          // Lock to protect shared access to this peer's state
-	peers     []*labrpc.ClientEnd // RPC end points of all peers
-	persister *Persister          // Object to hold this peer's persisted state
-	me        int                 // this peer's index into peers[]
-	dead      int32               // set by Kill()
-	applyChan chan ApplyMsg
+	debugLogFile *os.File
+	mu           sync.Mutex          // Lock to protect shared access to this peer's state
+	peers        []*labrpc.ClientEnd // RPC end points of all peers
+	persister    *Persister          // Object to hold this peer's persisted state
+	me           int                 // this peer's index into peers[]
+	dead         int32               // set by Kill()
+	applyChan    chan ApplyMsg
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
@@ -493,6 +495,11 @@ func (rf *Raft) ticker() {
 func (rf *Raft) sendAppendEntries(server int, term int) {
 	// If last log index ≥ nextIndex for a follower: send AppendEntries RPC with log entries starting at nextIndex
 	rf.mu.Lock()
+	if rf.currentState != Leader || rf.currentTerm != term {
+		// is not leader
+		rf.mu.Unlock()
+		return
+	}
 	prevLogIndex := len(rf.log) - 1
 	prevLogTerm := rf.log[prevLogIndex].CommandTerm
 	var entries []LogEntry
@@ -524,7 +531,7 @@ func (rf *Raft) sendAppendEntries(server int, term int) {
 		// currentTerm < term
 		if rf.currentTerm < reply.Term {
 			rf.convertToFollower(reply.Term)
-			rf.Log(2, "sendAppendEntries("+strconv.Itoa(rf.me)+"): peer("+strconv.Itoa(server)+"); term("+strconv.Itoa(rf.currentTerm)+"); term-over: find bigger term peer.")
+			rf.Log(2, "sendAppendEntries("+strconv.Itoa(rf.me)+"): peer("+strconv.Itoa(server)+"); currentTerm("+strconv.Itoa(rf.currentTerm)+"); requestTerm("+strconv.Itoa(request.Term)+"); term-over: find bigger term peer.")
 			rf.persist()
 			// set election timer
 			rf.electionTimer = time.Now().UnixMilli()
@@ -533,14 +540,20 @@ func (rf *Raft) sendAppendEntries(server int, term int) {
 			return
 		}
 
+		if rf.currentState != Leader || rf.currentTerm != request.Term {
+			rf.Log(2, "sendAppendEntries("+strconv.Itoa(rf.me)+"): peer("+strconv.Itoa(server)+"); currentTerm("+strconv.Itoa(rf.currentTerm)+"); requestTerm("+strconv.Itoa(request.Term)+"); term changed || not Leader after reply.")
+			rf.mu.Unlock()
+			return
+		}
+
 		if reply.Success == 1 {
 			// success: update nextIndex and matchIndex for follower
-			rf.Log(2, "sendAppendEntries("+strconv.Itoa(rf.me)+"): peer("+strconv.Itoa(server)+"); term("+strconv.Itoa(rf.currentTerm)+"); nextIndex("+strconv.Itoa(lastLogIndex+1)+"); matchIndex("+strconv.Itoa(lastLogIndex)+")")
+			rf.Log(2, "sendAppendEntries("+strconv.Itoa(rf.me)+"): peer("+strconv.Itoa(server)+"); currentTerm("+strconv.Itoa(rf.currentTerm)+"); requestTerm("+strconv.Itoa(request.Term)+"); nextIndex("+strconv.Itoa(lastLogIndex+1)+"); matchIndex("+strconv.Itoa(lastLogIndex)+")")
 			rf.nextIndex[server] = lastLogIndex + 1
 			rf.matchIndex[server] = lastLogIndex
 		} else if reply.Success == 0 {
 			//fail because of log inconsistency
-			rf.Log(2, "sendAppendEntries("+strconv.Itoa(rf.me)+"): peer("+strconv.Itoa(server)+"), term("+strconv.Itoa(rf.currentTerm)+"); fail for log inconsistency")
+			rf.Log(2, "sendAppendEntries("+strconv.Itoa(rf.me)+"): peer("+strconv.Itoa(server)+"), currentTerm("+strconv.Itoa(rf.currentTerm)+"); requestTerm("+strconv.Itoa(request.Term)+"); fail for log inconsistency")
 			// If AppendEntries fails because of log inconsistency: decrement nextIndex and retry
 			if reply.ConflictTerm == -1 {
 				rf.nextIndex[server] = reply.ConflictIndex
@@ -551,12 +564,12 @@ func (rf *Raft) sendAppendEntries(server int, term int) {
 			go rf.sendAppendEntries(server, term)
 			rf.mu.Lock()
 		} else {
-			rf.Log(2, "sendAppendEntries("+strconv.Itoa(rf.me)+"): peer("+strconv.Itoa(server)+"), term("+strconv.Itoa(rf.currentTerm)+"); fail not for log inconsistency")
+			rf.Log(2, "sendAppendEntries("+strconv.Itoa(rf.me)+"): peer("+strconv.Itoa(server)+"), currentTerm("+strconv.Itoa(rf.currentTerm)+"); requestTerm("+strconv.Itoa(request.Term)+"); fail not for log inconsistency")
 		}
 	} else {
 		// wrong
 		rf.nextIndex[server] = request.PrevLogIndex + 1
-		rf.Log(2, "sendAppendEntries("+strconv.Itoa(rf.me)+"): peer("+strconv.Itoa(server)+"), term("+strconv.Itoa(rf.currentTerm)+"); no-response")
+		rf.Log(2, "sendAppendEntries("+strconv.Itoa(rf.me)+"): peer("+strconv.Itoa(server)+"), currentTerm("+strconv.Itoa(rf.currentTerm)+"); requestTerm("+strconv.Itoa(request.Term)+"); no-response")
 	}
 	rf.mu.Unlock()
 }
@@ -912,7 +925,14 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.matchIndex = make([]int, len(peers))
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
+	// debug
+	//f, err := os.OpenFile("out.txt", os.O_APPEND, os.ModePerm)
+	//if err == nil {
+	//	rf.debugLogFile = f
+	//} else {
+	//	f.Close()
+	//}
+	//log.SetOutput(f)
 	// log
 	rf.Log(1, "Make("+strconv.Itoa(me)+"): electionTimeout: ("+strconv.Itoa(int(rf.electionTimeout))+")")
 	// start ticker goroutine to start elections
