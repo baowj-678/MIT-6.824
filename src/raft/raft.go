@@ -252,8 +252,10 @@ func (rf *Raft) Snapshot(newLastIncludedIndex int, snapshot []byte) {
 		lastIncludeTerm := rf.log[index].CommandTerm
 		rf.lastIncludedIndex = newLastIncludedIndex
 		rf.lastIncludedTerm = lastIncludeTerm
-
-		rf.Log(1, "Snapshot("+strconv.Itoa(rf.me)+"): lastIncludeIndex("+strconv.Itoa(newLastIncludedIndex)+"); lastIncludeTerm("+strconv.Itoa(lastIncludeTerm)+"); ")
+		if rf.log[index].CommandIndex != newLastIncludedIndex {
+			log.Fatalf("Snapshot(%v): lastIncludeIndex(%v); lastIncludeTerm(%v), newLastIncludedIndex(%v) \n log:(%v)", rf.me, rf.lastIncludedIndex, rf.lastIncludedTerm, newLastIncludedIndex, rf.log)
+		}
+		rf.Log(1, "Snapshot(%v): lastIncludeIndex(%v); lastIncludeTerm(%v); ", rf.me, newLastIncludedIndex, lastIncludeTerm)
 		rf.snapshot = snapshot
 		// remove log
 		rf.log = rf.log[index+1:]
@@ -282,6 +284,8 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshot, reply *InstallSnapshotRep
 						if rf.log[0].CommandIndex != args.LastIncludedIndex+1 {
 							panic("index is not continuous")
 						}
+					} else {
+						rf.log = []LogEntry{}
 					}
 				}
 				// install
@@ -767,7 +771,9 @@ func (rf *Raft) ApplyMsg() {
 			// apply
 			if rf.lastApplied < rf.lastIncludedIndex {
 				// apply snapshot
-				go rf.sendApplyMsgSnapshot(rf.snapshot, rf.lastIncludedIndex, rf.lastIncludedTerm)
+				snapshot := make([]byte, len(rf.snapshot))
+				copy(snapshot, rf.snapshot)
+				go rf.sendApplyMsgSnapshot(snapshot, rf.lastIncludedIndex, rf.lastIncludedTerm)
 				rf.lastApplied = rf.lastIncludedIndex // TODO
 			} else {
 				// apply log
