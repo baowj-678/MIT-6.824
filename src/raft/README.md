@@ -323,6 +323,14 @@ Raft的作者在其博士论文《[CONSENSUS: BRIDGING THEORY AND PRACTICE](http
 
 18. 【性能优化】**election timeout**的值初始化时，可以设置小一点（相对于过程重设时的），这样当集群启动时可以更快地发起第一轮选举；
 
+19. **Snapshot**的内容（无论是**Leader**还是**Follower**上的）可以认为是**永远正确**，只有是否**up-to-date**的区别。因为只有当**大于一半的Peer提交了该请求**，该请求才会生成**Snapshot**，所以生成**Snapshot**内容的**log**是正确的（换个角度说，如果Snapshot有错误，那么**Crash**后就会出错）。根据上述结论，在**Follower**响应**AppendEntries RPC**的函数中，对于**Leader**发送的在**Follower**的**lastIncludedIndex**之前的**Log**直接返回**Success**（即：reply.Success=1）即可。
+
+20. 接上一条，当**Snapshot**的**last included term**和**AppendEntries**的**term**冲突时，我们需要重新获取**Snapshot**，但是不需要删除**last included entry**之后的内容，因为**Snapshot**内容必为正确的，只是由于重新启动导致**trem=0**；
+
+21. 接上两条和**16条**，由于**Snapshot**内容可以认为是**永远正确**的，所以测试中不包括**last included term**是可以的，因为所有操作中**不需要比较last included term**；
+
+
+
 
 
 ## 4.测试
