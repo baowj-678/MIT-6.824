@@ -34,21 +34,20 @@ type Op struct {
 }
 
 type KVServer struct {
-	mu        sync.Mutex
-	me        int
-	rf        *raft.Raft
-	applyCh   chan raft.ApplyMsg
-	commandCh chan Op
-	dead      int32 // set by Kill()
+	mu      sync.Mutex
+	me      int
+	rf      *raft.Raft
+	applyCh chan raft.ApplyMsg
+	dead    int32 // set by Kill()
 
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	snapshotInterval time.Duration
-	kvDatabase       map[string]string
-	waitChannel      map[string]chan ChReply
-	clientMaxIdMap   map[string]int
-	lastApplied      int
+	snapshotInterval   time.Duration
+	kvDatabase         map[string]string
+	waitChannel        map[string]chan ChReply
+	clientMaxCommandId map[string]int
+	lastApplied        int
 }
 
 // TODO Get不用redoError
@@ -65,7 +64,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	opId := args.ClientId + strconv.Itoa(args.CommandId)
 	kv.mu.Lock()
 	// check is redo
-	if max, ok := kv.clientMaxIdMap[args.ClientId]; ok {
+	if max, ok := kv.clientMaxCommandId[args.ClientId]; ok {
 		if args.CommandId <= max {
 			DPrintf("Server-Get(%v): CommadId(%v) from ClientId(%v) has done", kv.me, op.CommandId, op.ClientId)
 			reply.Err = ErrReDo
@@ -98,9 +97,12 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			reply.Value = rep.Value
 		case <-ctx.Done():
 			kv.mu.Lock()
-			delete(kv.waitChannel, opId)
+			_, exist := kv.waitChannel[opId]
+			if exist {
+				delete(kv.waitChannel, opId)
+				close(ch)
+			}
 			kv.mu.Unlock()
-			close(ch)
 			DPrintf("Server-Get(%v): timeout, CommandId(%v) from ClientId(%v)", kv.me, op.CommandId, op.ClientId)
 			reply.Err = ErrTimeOut
 		}
@@ -125,9 +127,9 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	opId := args.ClientId + strconv.Itoa(args.CommandId)
 	kv.mu.Lock()
 	// check is redo
-	if max, ok := kv.clientMaxIdMap[args.ClientId]; ok {
+	if max, ok := kv.clientMaxCommandId[args.ClientId]; ok {
 		if args.CommandId <= max {
-			log.Printf("Server-PutAppend(%v): CommandId(%v) from ClientId(%v) has done", kv.me, op.CommandId, op.ClientId)
+			DPrintf("Server-PutAppend(%v): CommandId(%v) from ClientId(%v) has done", kv.me, op.CommandId, op.ClientId)
 			reply.Err = ErrReDo
 			kv.mu.Unlock()
 			DPrintf("Server-PutAppend(%v): reply(%v)", kv.me, reply.Err)
@@ -223,7 +225,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
-	kv.clientMaxIdMap = map[string]int{}
+	kv.clientMaxCommandId = map[string]int{}
 	kv.kvDatabase = map[string]string{}
 	kv.waitChannel = map[string]chan ChReply{}
 	kv.snapshotInterval = 100
@@ -240,16 +242,16 @@ func (kv *KVServer) doOp(op Op) (bool, ChReply) {
 		Err:   OK,
 		Value: "",
 	}
-	if max, ok := kv.clientMaxIdMap[op.ClientId]; ok {
+	if max, ok := kv.clientMaxCommandId[op.ClientId]; ok {
 		if op.CommandId > max {
-			kv.clientMaxIdMap[op.ClientId] = op.CommandId
+			kv.clientMaxCommandId[op.ClientId] = op.CommandId
 		} else {
-			log.Printf("Server-doOp(%v): CommadId(%v) from ClientId(%v) has done", kv.me, op.CommandId, op.ClientId)
+			DPrintf("Server-doOp(%v): CommadId(%v) from ClientId(%v) has done", kv.me, op.CommandId, op.ClientId)
 			rep.Err = ErrReDo
 			return false, rep
 		}
 	} else {
-		kv.clientMaxIdMap[op.ClientId] = op.CommandId
+		kv.clientMaxCommandId[op.ClientId] = op.CommandId
 	}
 	switch op.Op {
 	case "Get":
@@ -323,7 +325,7 @@ func (kv *KVServer) Snapshot() {
 				e := labgob.NewEncoder(w)
 				e.Encode(kv.lastApplied)
 				e.Encode(kv.kvDatabase)
-				e.Encode(kv.clientMaxIdMap)
+				e.Encode(kv.clientMaxCommandId)
 				data := w.Bytes()
 				kv.rf.Snapshot(kv.lastApplied, data)
 			}
@@ -347,7 +349,7 @@ func (kv *KVServer) ReadSnapshotFromRaft(snapshot []byte) {
 	} else {
 		kv.lastApplied = lastIncludeIndex
 		kv.kvDatabase = state
-		kv.clientMaxIdMap = m
+		kv.clientMaxCommandId = m
 		DPrintf("ReadSnapshotFromRaft(%v): lastApplied(%v)", kv.me, kv.lastApplied)
 	}
 }

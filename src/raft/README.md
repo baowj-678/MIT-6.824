@@ -45,7 +45,7 @@ Peer对于**AppendEntries RPC的回复**。
 
 <img src="./.md/snapshot.png" style="zoom:80%;" />
 
-但由于**Lab2**中的**Snapshot**是测试代码提供的，所以只包括**last included index**和**state machine state**部分，**Lab2**对应的测试代码如下（**config.go/applierSnap**）：
+但由于**Lab2**中的**Snapshot**是测试代码提供的，所以只包括**last included index**和**state machine state**部分（**last included term**可以不保存，因为**Snapshot**内容默认是**完全正确的**，只存在**是否up-to-date**的问题），**Lab2**对应的测试代码如下（**config.go/applierSnap**）：
 
 ~~~go
 if (m.CommandIndex+1)%SnapShotInterval == 0 {
@@ -141,8 +141,6 @@ if (m.CommandIndex+1)%SnapShotInterval == 0 {
 
 
 
-
-
 ### GetState
 
 用于测试，返回**当前Term**和**是否是Leader**。
@@ -190,11 +188,11 @@ Leader的单独线程，心跳函数，周期性(**heartBeatInterval**)调用（
 
 #### 原文关键点
 
-<img src=".md/RequestVote.png" alt="img" style="zoom:50%;" />
+> <img src=".md/RequestVote.png" alt="img" style="zoom:50%;" />
 
 * **up-to-date**
 
-    > Raft determines which of two logs is more **up-to-date** by comparing the index and term of the last entries in the logs. If the logs have last entries with different terms, then the log with the later term is more up-to-date. If the logs end with the same term, then whichever log is longer is more up-to-date.
+> Raft determines which of two logs is more **up-to-date** by comparing the index and term of the last entries in the logs. If the logs have last entries with different terms, then the log with the later term is more up-to-date. If the logs end with the same term, then whichever log is longer is more up-to-date.
 
 
 
@@ -208,14 +206,6 @@ Leader的单独线程，心跳函数，周期性(**heartBeatInterval**)调用（
 > <img src=".md/AppendEntries.png" alt="img.png" style="zoom:80%;" />
 
 > While waiting for votes, a candidate may receive an AppendEntries RPC from another server claiming to be leader. If the leader’s term (included in its RPC) is at least as large as the candidate’s current term, then the candidate recognizes the leader as legitimate and returns to follower state. If the term in the RPC is smaller than the candidate’s current term, then the candidate rejects the RPC and continues in candidate state.
-
-#### 实现流程
-
-* 检查term；
-
-* 如果**peer term < leader term**，变为**Follower**（不投票），如果**peer term > leader term**，**返回**追加日志失败以及当前term；
-* 检查log；
-* 如果**peer term = leader term**，为该Leader投票
 
 
 
@@ -256,11 +246,11 @@ Raft的作者在其博士论文《[CONSENSUS: BRIDGING THEORY AND PRACTICE](http
 ## 3.注意事项【踩坑记录】
 1. Leader没有**election timeout**，所以**Leader不会主动退出**。只有收到其他Leader发送的**AppendEntries**（Term大于当前Leader）后会自动退出；
 
-2. 发送**AppendEntries RPC**一定要使用**子线程**（可以**用chan进行同步**），不然会阻塞在**失联**的Peer上；
+2. 发送**AppendEntries RPC**一定要使用**子线程**（可以**用chan进行同步**），不然会阻塞在**失联**的Peer上。
 
 3. **up-to-date**：最后一个**log的Term大的Peer更up-to-date**；否则，如果term一样，则**log长度长的更up-to-date**。
 
-4. 原文中提到**convert to follower**，只是将**currentState**转为**Follower**，只要把**votedFor**设为**-1**，**不需要为该server投票**。
+4. 原文中提到**convert to follower**，只是将**currentState**转为**Follower**，只要把**votedFor**设为**-1**，**不需要为该server投票**，因为投票必须通过**RequestVote**（该操作会比较**Log**信息）。
 
 5. **Figure 8[不能提交小于currentTerm的log]**
 
@@ -286,12 +276,13 @@ Raft的作者在其博士论文《[CONSENSUS: BRIDGING THEORY AND PRACTICE](http
 
 8. Follower的**AppendEntries RPC**响应中：如果发现**冲突entry，需要删除该entry以及之后的所有entry**；
 
-9. election中，Candidate收到RequestVote Reply后要**确认Term没有发生改变**（在发送RequestVote到收到Reply这段时间，Term可能发生改变）后才可以变为Leader；
+9. election中，Candidate收到RequestVote Reply后要**确认Term没有发生改变**（在发送RequestVote到收到Reply这段时间，Term可能发生改变）后才可以变为Leader。
 
-10. **mutex**和**channel**一起使用可能会造成死锁问题。【TODO】
+10. **mutex**和**channel**一起使用可能会造成**死锁问题**。如下列代码，当一个线程执行到**1**位置时，在**a channel**被阻塞，同时持有**b锁**；同时另一个线程执行到**2**时，无法读取**a channel**同时又无法获取**b锁**，形成**死锁**。
 
     ~~~go
     for a <- ch {
+        >>>>>>>>>>>>>>>>>> 2
         b.Lock()
         // do something
         b.Unlock()
@@ -300,6 +291,7 @@ Raft的作者在其博士论文《[CONSENSUS: BRIDGING THEORY AND PRACTICE](http
     
     /////////////////////////////////////////
     b.Lock()
+    >>>>>>>>>>>>>>>> 1
     a <- 7
     b.Unlock()
     
@@ -315,7 +307,7 @@ Raft的作者在其博士论文《[CONSENSUS: BRIDGING THEORY AND PRACTICE](http
 
 14. Follower的AppendEntries RPC响应中：只有在**log长度小于PrevLogIndex时才回复ConflictIndex**，按照ConflictIndex回退；其他情况（包括日志冲突）都回复ConflictTerm，按照term回退；
 
-15. Leader的**decrementNextIndex**中，判断条件需要是*rf.log[i].CommandTerm == conflictTerm-1*， 不能是*rf.log[i].CommandTerm < conflictTerm*，因为有可能Follower的log term大于Leader，这样每次只能回退一条log，影响日志同步效率；
+15. **Leader**的**decrementNextIndex**中，判断条件需要是***rf.log[i].CommandTerm == conflictTerm-1***， 不能是***rf.log[i].CommandTerm < conflictTerm***，因为**有可能Follower的log term大于Leader**（有可能该**Follower**之前网络出问题，导致**term**疯狂增加，之后又接入网络成为**Leader**，之后网络又出问题，并追加**term很大的log**），这样每次只能回退一条log，影响日志同步效率；
 
 16. Follower的**InstallSnapshot RPC**响应【InstallSnapshot 函数】中，仅要求当前snapshot的**lastIncludedIndex不大于Leader的lastIncludeIndex**【即，rf.lastIncludedIndex <= args.LastIncludedIndex】。因为官方测试代码中的snapshot仅包括**last included index**和**state machine state**，不包括**last included term**，这就导致在某个peer**crash**重启后其**last included term**被置为0，需要重新获取该term的**snapshot**；
 
@@ -335,6 +327,27 @@ Raft的作者在其博士论文《[CONSENSUS: BRIDGING THEORY AND PRACTICE](http
 
 ## 4.测试
 
+通过**1000**次重复测试。
+
+测试脚本如下：
+
+~~~shell
+#!/bin/bash
+
+
+count=1
+while [[ count -le 1000 ]]
+do
+    go test -run 2D  > out.txt 2>&1
+    if [[ $? -ne 0 ]]; then
+        echo "fail at $count\n"
+        break
+    fi
+    echo "test $count\n"
+    ((count++))
+done
+~~~
+
 
 
 ## 5.问题
@@ -346,3 +359,10 @@ Raft的作者在其博士论文《[CONSENSUS: BRIDGING THEORY AND PRACTICE](http
 
 
 
+2. **注意事项**的**第15条**是否正确？
+
+
+
+
+
+## 6.优化思路

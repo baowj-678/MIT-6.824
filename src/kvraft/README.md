@@ -6,11 +6,54 @@
 
 ## 总体思路
 
+### Client
+
+1. **Client**随机生成自己的**64位ID**（碰撞的概率极低）；
+2. **Client**对于每个发送到**Server**的请求都从1开始编号，并递增；
+3. 收到**ErrWrongLeader**、**ErrTimeOut**：更换发送的**Server**；
+4. 收到**ErrReDo**：对于*PutAppend*请求直接返回；对于*Get*请求，更新**请求编号**后重新发送；
+5. 对于每个**Server**发生**ErrWrongLeader**、**ErrTimeOut**后，100ms内不会再成为**Leader**；
+
+
+
+### Server
+
+1. 收到**RPC**请求后，先调用**Raft**的**Start**提交日志，等**日志一致**后进行**具体操作**，完成后返回**RPC**结果；
+2. 每个**RPC**请求**Start**提交后如果是**Leader**，都会生成一个**Channel**，**RPC请求**阻塞在该**Channel**等待结果，如果等到超时（5s）会放弃等待并返回**ErrTimeout**结果；
+3. **applier**线程，等待**Raft**的**apply channel**，根据内容进行**snapshot**或者**具体操作**，操作完成后返回结果到**2**中的**Channel**；
+4. **Server**会为每个**Client**维护一个**MaxCommandID**，如果进行**具体操作**时，该**command**的**Id**小于等于该**MaxCommandID**则返回**ErrReDo**；
+
 
 
 ## 结构体
 
+### KVServer
+
+* **snapshotInterval**：**Snapshot**线程的睡眠时间；
+* **kvDatabase**：**KV**数据库；
+* **waitChannel**：Server的**RPC**响应函数阻塞等待结果的**Channel**；
+* **clientMaxCommandId**：每个**Client**目前提交的最大**command id**；
+* **lastApplied**：上一次**Apply**的**log index**（不同于**raft**的**lastApplied**，用于生成**Snapshot**）；
+
+
+
+### Clerk
+
+* **leader**：保存最新的**Leader Id**；
+* **clientId**：初始化随机生成的**Client Id**【参见**总体思路->1**】；
+* **commandId**：目前提交的最新**Command Id**【递增】；
+* **wrongLeaderTimer**：对于每个**Server**最近的发送请求后返回**ErrTimeout**或者**ErrWrongLeader**的**Timer**，短时多次重复发送；
+
+
+
 ## 函数
+
+* **Get**：**Get RPC**的响应函数；
+* **PutAppend**：**PutAppend RPC**响应函数；
+* **doOp**：对**KV数据库**进行操作的函数；
+* **applier**：接收**Raft**的**apply channel**并进行处理的线程；
+* **Snapshot**：进行快照的线程（当**Raft**的日志达到**maxraftstate**的80%时），生成快照并发送给**Raft**持久化；
+* **ReadSnapshotFromRaft**：从**Raft**获取快照并安装；
 
 ## 测试
 
@@ -40,4 +83,6 @@
 
 
 ## 优化思路
+
+1. 将**Get**请求分流至**Follower**。
 
