@@ -272,7 +272,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshot, reply *InstallSnapshotRep
 	rf.Log(2, "InstallSnapshot(%v): this.lastIncludedIndex(%v), leader.lastIncludedIndex(%v)\n", rf.me, rf.lastIncludedIndex, args.LastIncludedIndex)
 	if rf.currentTerm == args.Term {
 		if rf.currentState == Follower {
-			if rf.lastIncludedIndex <= args.LastIncludedIndex {
+			if rf.lastIncludedIndex < args.LastIncludedIndex {
 				// remove some log
 				if len(rf.log) > 0 {
 					latestLogIndex := rf.log[len(rf.log)-1].CommandIndex
@@ -832,7 +832,7 @@ func (rf *Raft) sendApplyMsgSnapshot(snapshot []byte, lastIncludedIndex int, las
 func (rf *Raft) sendApplyMsgLog(entries []LogEntry) {
 	// send log
 	for _, entry := range entries {
-		rf.Log(2, "sendApplyMsgLog(%v): start, Index(%v); Command(%v)\n", rf.me, entry.CommandIndex, entry.Command)
+		rf.Log(1, "sendApplyMsgLog(%v): start, Index(%v); Command(%v)\n", rf.me, entry.CommandIndex, entry.Command)
 		newCommitApplyMsg := ApplyMsg{
 			Command:      entry.Command,
 			CommandIndex: entry.CommandIndex,
@@ -841,7 +841,7 @@ func (rf *Raft) sendApplyMsgLog(entries []LogEntry) {
 			SnapshotValid: false,
 		}
 		rf.applyChan <- newCommitApplyMsg
-		rf.Log(2, "sendApplyMsgLog(%v): finish, Index(%v); Command(%v)\n", rf.me, entry.CommandIndex, entry.Command)
+		rf.Log(1, "sendApplyMsgLog(%v): finish, Index(%v); Command(%v)\n", rf.me, entry.CommandIndex, entry.Command)
 	}
 }
 
@@ -930,12 +930,10 @@ func (rf *Raft) election() {
 			if rf.currentTerm == request.Term {
 				// if term not changed, be leader
 				rf.Log(1, "election(%v): be leader; term(%v)", rf.me, rf.currentTerm)
-				rf.currentState = Leader
 				// init
 				rf.initLeader()
 				rf.mu.Unlock()
-				// start heartbeat go routine
-				go rf.HeartBeat()
+				rf.Start("new-leader")
 			} else {
 				rf.mu.Unlock()
 			}
@@ -960,6 +958,7 @@ func (rf *Raft) getLatestLogIndex() (lastLogIndex int, lastLogTerm int) {
 
 // initLeader. [No Lock]
 func (rf *Raft) initLeader() {
+	rf.currentState = Leader
 	index, _ := rf.getLatestLogIndex()
 	for i := 0; i < len(rf.nextIndex); i++ {
 		rf.nextIndex[i] = index + 1
@@ -967,6 +966,9 @@ func (rf *Raft) initLeader() {
 	for i := 0; i < len(rf.matchIndex); i++ {
 		rf.matchIndex[i] = 0
 	}
+	// start heartbeat go routine
+	go rf.HeartBeat()
+	//fmt.Println("new-leader")
 }
 
 // AppendEntries
@@ -1196,5 +1198,5 @@ func getVerbosity() int {
 	//		log.Fatalf("Invalid verbosity %v", v)
 	//	}
 	//}
-	return 0
+	return -1
 }

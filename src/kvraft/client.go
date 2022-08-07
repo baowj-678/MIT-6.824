@@ -12,10 +12,14 @@ type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
 	leader    int
-	clientId  string
-	commandId int
+	getServer int
 
-	wrongLeaderTimer map[int]int64
+	clientId               string
+	commandId              int
+	prevPutAppendCommandId int
+
+	notUpdateServerTimer map[int]int64
+	wrongLeaderTimer     map[int]int64
 }
 
 func nrand() int64 {
@@ -31,10 +35,13 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	// You'll have to add code here.
 	ck.clientId = strconv.FormatInt(nrand(), 10)
 	ck.wrongLeaderTimer = map[int]int64{}
+	ck.notUpdateServerTimer = map[int]int64{}
 	for i := 0; i < len(servers); i++ {
 		ck.wrongLeaderTimer[i] = 0
+		ck.notUpdateServerTimer[i] = 0
 	}
 	ck.commandId = 0
+	ck.prevPutAppendCommandId = 0
 	DPrintf("Client(%v); Start", ck.clientId)
 	return ck
 }
@@ -55,12 +62,14 @@ func (ck *Clerk) Get(key string) string { // TODO Get需要发给Leader吗？
 	// You will have to modify this function.
 	ck.commandId += 1
 	request := GetArgs{
-		Key:       key,
-		CommandId: ck.commandId,
-		ClientId:  ck.clientId,
+		Key:                    key,
+		CommandId:              ck.commandId,
+		ClientId:               ck.clientId,
+		PrevPutAppendCommandId: ck.prevPutAppendCommandId,
 	}
 	reply := GetReply{}
-	server := ck.PickLeaderServer(false, -1)
+	ck.pickServer()
+	server := ck.getServer
 	for {
 		DPrintf("Client-Get(%v): CommandId(%v) to Server(%v), Get-Key(%v)", ck.clientId, request.CommandId, server, request.Key)
 		ok := ck.servers[server].Call("KVServer.Get", &request, &reply)
@@ -71,20 +80,15 @@ func (ck *Clerk) Get(key string) string { // TODO Get需要发给Leader吗？
 			} else if reply.Err == ErrNoKey {
 				DPrintf("Client-Get(%v), No Key(%v), for CommandId(%v)", ck.clientId, key, request.CommandId)
 				return ""
-			} else if reply.Err == ErrWrongLeader {
-				ck.wrongLeaderTimer[server] = time.Now().UnixMilli()
+			} else if reply.Err == ErrNotUpdate {
+				ck.notUpdateServerTimer[server] = time.Now().UnixMilli()
 				// pick new server
-				server = ck.PickLeaderServer(true, -1)
-			} else if reply.Err == ErrTimeOut {
-				server = ck.PickLeaderServer(true, -1)
-			} else if reply.Err == ErrReDo {
-				DPrintf("Client-Get(%v), Redo Key(%v), for CommandId(%v)", ck.clientId, key, request.CommandId)
-				ck.commandId += 1
-				request.CommandId = ck.commandId
+				server = ck.pickServer()
 			}
 		} else {
+			ck.notUpdateServerTimer[server] = time.Now().UnixMilli()
 			// pick new server
-			server = ck.PickLeaderServer(true, -1)
+			server = ck.pickServer()
 		}
 	}
 }
@@ -116,6 +120,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		ok := ck.servers[server].Call("KVServer.PutAppend", &request, &reply)
 		if ok {
 			if reply.Err == OK {
+				ck.prevPutAppendCommandId = ck.commandId
 				DPrintf("Client-%v(%v), Successfully PutAppend Key(%v), Value(%v), for CommandId(%v)\n", op, ck.clientId, key, value, request.CommandId)
 				return
 			} else if reply.Err == ErrWrongLeader {
@@ -125,13 +130,15 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			} else if reply.Err == ErrNoKey {
 				panic("PutAppend should not reply ErrNoKey")
 			} else if reply.Err == ErrTimeOut {
+				ck.wrongLeaderTimer[server] = time.Now().UnixMilli()
 				server = ck.PickLeaderServer(true, -1)
 			} else if reply.Err == ErrReDo {
+				ck.prevPutAppendCommandId = ck.commandId
 				DPrintf("Client-%v(%v), Redo PutAppend Key(%v), Value(%v), for CommandId(%v)", op, ck.clientId, key, value, request.CommandId)
 				return
 			}
-
 		} else {
+			ck.wrongLeaderTimer[server] = time.Now().UnixMilli()
 			// pick new server TODO:是否立马重新选择serevr
 			server = ck.PickLeaderServer(true, -1)
 		}
@@ -167,4 +174,12 @@ func (ck *Clerk) PickLeaderServer(change bool, newLeader int) int {
 		}
 	}
 	return ck.leader
+}
+
+func (ck *Clerk) pickServer() int {
+	ck.getServer = (ck.getServer + 1) % len(ck.servers)
+	if time.Now().UnixMilli()-ck.notUpdateServerTimer[ck.getServer] < 60 {
+		time.Sleep(30 * time.Millisecond)
+	}
+	return ck.getServer
 }

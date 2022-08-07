@@ -43,72 +43,37 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	snapshotInterval   time.Duration
+	snapshotInterval   time.Duration // 100ms
 	kvDatabase         map[string]string
 	waitChannel        map[string]chan ChReply
 	clientMaxCommandId map[string]int
 	lastApplied        int
 }
 
+// Get may return
 // TODO Get不用redoError
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	// is Leader
-	op := Op{
-		Op:        "Get",
-		Key:       args.Key,
-		Value:     "",
-		ClientId:  args.ClientId,
-		CommandId: args.CommandId,
-	}
-	DPrintf("Server-Get(%v): CommandId(%v) from ClientId(%v)", kv.me, op.CommandId, op.ClientId)
-	opId := args.ClientId + strconv.Itoa(args.CommandId)
 	kv.mu.Lock()
-	// check is redo
-	if max, ok := kv.clientMaxCommandId[args.ClientId]; ok {
-		if args.CommandId <= max {
-			DPrintf("Server-Get(%v): CommadId(%v) from ClientId(%v) has done", kv.me, op.CommandId, op.ClientId)
-			reply.Err = ErrReDo
-			kv.mu.Unlock()
-			DPrintf("Server-Get(%v): reply(%v), value(%v)", kv.me, reply.Err, reply.Value)
-			return
-		}
-	}
-	DPrintf("Server-Get(%v): start, CommadId(%v) from ClientId(%v)", kv.me, op.CommandId, op.ClientId)
-	_, _, isLeader := kv.rf.Start(op)
-	DPrintf("Server-Get(%v): after start, CommadId(%v) from ClientId(%v)", kv.me, op.CommandId, op.ClientId)
-	kv.mu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if isLeader {
-		kv.mu.Lock()
-		// make channel
-		ch := make(chan ChReply)
-		kv.waitChannel[opId] = ch
-		kv.mu.Unlock()
-		DPrintf("Server-Get(%v): wait, CommandId(%v) from ClientId(%v)", kv.me, op.CommandId, op.ClientId)
-		select {
-		case rep := <-ch:
-			kv.mu.Lock()
-			delete(kv.waitChannel, opId)
-			kv.mu.Unlock()
-			close(ch)
-			DPrintf("Server-Get(%v): get response, CommandId(%v) from ClientId(%v)", kv.me, op.CommandId, op.ClientId)
-			reply.Err = rep.Err
-			reply.Value = rep.Value
-		case <-ctx.Done():
-			kv.mu.Lock()
-			_, exist := kv.waitChannel[opId]
-			if exist {
-				delete(kv.waitChannel, opId)
-				close(ch)
+	if lastId, ok := kv.clientMaxCommandId[args.ClientId]; ok {
+		if lastId >= args.PrevPutAppendCommandId {
+			if s, ok := kv.kvDatabase[args.Key]; ok {
+				reply.Value = s
+				reply.Err = OK
+				DPrintf("Server-Get(%v): CommandId(%v) from ClientId(%v), %v Key(%v), Value(%v)", kv.me, args.CommandId, args.ClientId, "Get", args.Key, s)
+			} else {
+				reply.Err = ErrNoKey
+				DPrintf("Server-doOp(%v): CommandId(%v) from ClientId(%v), %v Key(%v), Value(None)", kv.me, args.CommandId, args.ClientId, "Get", args.Key)
 			}
-			kv.mu.Unlock()
-			DPrintf("Server-Get(%v): timeout, CommandId(%v) from ClientId(%v)", kv.me, op.CommandId, op.ClientId)
-			reply.Err = ErrTimeOut
+		} else {
+			reply.Err = ErrNotUpdate
 		}
 	} else {
-		reply.Err = ErrWrongLeader
+		kv.clientMaxCommandId[args.ClientId] = 0
+		if args.PrevPutAppendCommandId <= 0 {
+			reply.Err = ErrNoKey
+		}
 	}
+	kv.mu.Unlock()
 	DPrintf("Server-Get(%v): reply(%v), value(%v)", kv.me, reply.Err, reply.Value)
 	return
 }
@@ -254,17 +219,6 @@ func (kv *KVServer) doOp(op Op) (bool, ChReply) {
 		kv.clientMaxCommandId[op.ClientId] = op.CommandId
 	}
 	switch op.Op {
-	case "Get":
-		if s, ok := kv.kvDatabase[op.Key]; ok {
-			rep.Value = s
-			rep.Err = OK
-			DPrintf("Server-doOp(%v): CommandId(%v) from ClientId(%v), %v Key(%v), Value(%v)", kv.me, op.CommandId, op.ClientId, op.Op, op.Key, s)
-			return true, rep
-		} else {
-			rep.Err = ErrNoKey
-			DPrintf("Server-doOp(%v): CommandId(%v) from ClientId(%v), %v Key(%v), Value(None)", kv.me, op.CommandId, op.ClientId, op.Op, op.Key)
-			return false, rep
-		}
 	case "Put":
 		kv.kvDatabase[op.Key] = op.Value
 		rep.Err = OK
@@ -290,24 +244,32 @@ func (kv *KVServer) applier() {
 	DPrintf("Server-applier(%v): Start", kv.me)
 	for !kv.killed() {
 		msg := <-kv.applyCh
-		kv.mu.Lock()
 		if msg.SnapshotValid {
+			kv.mu.Lock()
 			// install snapshot
 			kv.ReadSnapshotFromRaft(msg.Snapshot)
 			kv.mu.Unlock()
 			DPrintf("Server-applier(%v): Snapshot", kv.me)
 		} else {
 			// apply entry
-			_, val := kv.doOp(msg.Command.(Op))
-			DPrintf("Server-applier(%v): Command, CommandId(%v) from ClientId(%v), applyIndex(%v)", kv.me, msg.Command.(Op).CommandId, msg.Command.(Op).ClientId, msg.CommandIndex)
-			kv.lastApplied = msg.CommandIndex
-			// reply channel
-			opId := msg.Command.(Op).ClientId + strconv.Itoa(msg.Command.(Op).CommandId)
-			ch, exist := kv.waitChannel[opId]
-			delete(kv.waitChannel, opId)
-			kv.mu.Unlock()
-			if exist {
-				ch <- val
+			switch msg.Command.(type) {
+			case string:
+				kv.mu.Lock()
+				DPrintf("Server-applier(%v): New Leader", kv.me)
+				kv.mu.Unlock()
+			case Op:
+				kv.mu.Lock()
+				_, val := kv.doOp(msg.Command.(Op))
+				DPrintf("Server-applier(%v): Command, CommandId(%v) from ClientId(%v), applyIndex(%v)", kv.me, msg.Command.(Op).CommandId, msg.Command.(Op).ClientId, msg.CommandIndex)
+				kv.lastApplied = msg.CommandIndex
+				// reply channel
+				opId := msg.Command.(Op).ClientId + strconv.Itoa(msg.Command.(Op).CommandId)
+				ch, exist := kv.waitChannel[opId]
+				delete(kv.waitChannel, opId)
+				kv.mu.Unlock()
+				if exist {
+					ch <- val
+				}
 			}
 		}
 	}
@@ -337,7 +299,6 @@ func (kv *KVServer) Snapshot() {
 
 func (kv *KVServer) ReadSnapshotFromRaft(snapshot []byte) {
 	// snapshot
-
 	r := bytes.NewBuffer(snapshot)
 	d := labgob.NewDecoder(r)
 	var lastIncludeIndex int
