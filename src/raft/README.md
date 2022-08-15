@@ -321,7 +321,7 @@ Raft的作者在其博士论文《[CONSENSUS: BRIDGING THEORY AND PRACTICE](http
 
 21. 接上两条和**16条**，由于**Snapshot**内容可以认为是**永远正确**的，所以测试中不包括**last included term**是可以的，因为所有操作中**不需要比较last included term**；
 
-
+22. 【永远不要想当然认为**子线程**是**按照创建代码出现的顺序执行**的】要给**sendApplyMsgLog**加锁，该函数主要用于发送**ApplyCh**，如果不加锁的话可能会有多个**sendApplyMsgLog**同时被调用，导致发送的**ApplyCh**乱序；
 
 
 

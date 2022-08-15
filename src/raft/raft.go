@@ -50,6 +50,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	CommandTerm  int
 
 	// For 2D:
 	SnapshotValid bool
@@ -105,6 +106,10 @@ type LogEntry struct {
 	CommandIndex int
 }
 
+func (le *LogEntry) equal(x *LogEntry) bool {
+	return le.CommandTerm == x.CommandTerm && le.CommandIndex == x.CommandIndex
+}
+
 //
 // Raft
 // A Go object implementing a single Raft peer.
@@ -144,6 +149,9 @@ type Raft struct {
 
 	// Other data
 	currentState State
+
+	// special mutex
+	sendApplyMsgLogMu sync.Mutex
 }
 
 //
@@ -207,18 +215,34 @@ func (rf *Raft) readPersist(state []byte, snapshot []byte) {
 	if snapshot == nil || len(snapshot) < 1 { // bootstrap without any state?
 		return
 	}
-	// snapshot
+	// snapshot, for Lab3
 	r = bytes.NewBuffer(snapshot)
 	d = labgob.NewDecoder(r)
-	var lastIncludeIndex int
-	if d.Decode(&lastIncludeIndex) != nil {
+	var lastIncludedIndex int
+	var lastIncludedTerm int
+	if d.Decode(&lastIncludedIndex) != nil ||
+		d.Decode(&lastIncludedTerm) != nil {
 	} else {
 		rf.mu.Lock()
-		rf.lastIncludedIndex = lastIncludeIndex
+		rf.lastIncludedIndex = lastIncludedIndex
+		rf.lastIncludedTerm = lastIncludedTerm
 		rf.snapshot = snapshot
-		rf.Log(1, "readPersist("+strconv.Itoa(rf.me)+"): lastIncludeIndex("+strconv.Itoa(lastIncludeIndex)+"); lastIncludeTerm("+strconv.Itoa(lastIncludeIndex)+"); ")
+		rf.Log(1, "readPersist("+strconv.Itoa(rf.me)+"): lastIncludeIndex("+strconv.Itoa(lastIncludedIndex)+"); lastIncludeTerm("+strconv.Itoa(lastIncludedTerm)+"); ")
 		rf.mu.Unlock()
 	}
+
+	// snpshot, for Lab2
+	//r = bytes.NewBuffer(snapshot)
+	//d = labgob.NewDecoder(r)
+	//var lastIncludedIndex int
+	//if d.Decode(&lastIncludedIndex) != nil {
+	//} else {
+	//	rf.mu.Lock()
+	//	rf.lastIncludedIndex = lastIncludedIndex
+	//	rf.snapshot = snapshot
+	//	rf.Log(1, "readPersist("+strconv.Itoa(rf.me)+"): lastIncludeIndex("+strconv.Itoa(lastIncludedIndex)+")")
+	//	rf.mu.Unlock()
+	//}
 }
 
 //
@@ -831,11 +855,14 @@ func (rf *Raft) sendApplyMsgSnapshot(snapshot []byte, lastIncludedIndex int, las
 // sendApplyMsg.
 func (rf *Raft) sendApplyMsgLog(entries []LogEntry) {
 	// send log
+	rf.sendApplyMsgLogMu.Lock()
+	defer rf.sendApplyMsgLogMu.Unlock()
 	for _, entry := range entries {
 		rf.Log(2, "sendApplyMsgLog(%v): start, Index(%v); Command(%v)\n", rf.me, entry.CommandIndex, entry.Command)
 		newCommitApplyMsg := ApplyMsg{
 			Command:      entry.Command,
 			CommandIndex: entry.CommandIndex,
+			CommandTerm:  entry.CommandTerm,
 			CommandValid: true,
 			// Snapshot false
 			SnapshotValid: false,
@@ -844,35 +871,6 @@ func (rf *Raft) sendApplyMsgLog(entries []LogEntry) {
 		rf.Log(2, "sendApplyMsgLog(%v): finish, Index(%v); Command(%v)\n", rf.me, entry.CommandIndex, entry.Command)
 	}
 }
-
-//func (rf *Raft) preVote(request *RequestVoteArgs) bool {
-//	ch := make(chan int)
-//	// start sendPreRequestVote goRoutine
-//	for id, _ := range rf.peers {
-//		if id == rf.me {
-//			// don't need to vote for myself.
-//			continue
-//		}
-//		// pre request for vote
-//		go rf.sendPreRequestVote(id, request, ch)
-//	}
-//	currentVotesCount := 1
-//	finishThreadCount := 0
-//	// wait for answer
-//	for ok := range ch {
-//		finishThreadCount += 1
-//		if ok == 1 {
-//			currentVotesCount += 1
-//		}
-//		if currentVotesCount > len(rf.peers)/2 {
-//			return true
-//		}
-//		if finishThreadCount == len(rf.peers)-1 {
-//			break
-//		}
-//	}
-//	return false
-//}
 
 //
 // election
@@ -1085,9 +1083,9 @@ func (rf *Raft) doAppendEntries(entries []LogEntry, logIndex int) {
 	} else if len(rf.log) > logIndex {
 		i := 0
 		for ; i < len(entries) && logIndex < len(rf.log); i++ {
-			if rf.log[logIndex] != (entries)[i] {
+			if !rf.log[logIndex].equal(&entries[i]) {
 				// not match -> remove all log after logIndex and append new entries
-				rf.log = append(rf.log[:logIndex], (entries)[i:]...)
+				rf.log = append(rf.log[:logIndex], entries[i:]...)
 				return
 			}
 			logIndex += 1
