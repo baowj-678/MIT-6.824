@@ -29,13 +29,16 @@ type Config struct {
 }
 
 const (
-	OK = "OK"
+	OK         = "OK"
+	ErrTimeout = "ErrTimeout"
+	ErrRedo    = "ErrRedo"
 )
 
 type Err string
 
 type JoinArgs struct {
 	Servers map[int][]string // new GID -> servers mappings
+	RPCArgs
 }
 
 type JoinReply struct {
@@ -43,8 +46,14 @@ type JoinReply struct {
 	Err         Err
 }
 
+type RPCArgs struct {
+	ClientID   string
+	CommandIdx int
+}
+
 type LeaveArgs struct {
 	GIDs []int
+	RPCArgs
 }
 
 type LeaveReply struct {
@@ -55,6 +64,7 @@ type LeaveReply struct {
 type MoveArgs struct {
 	Shard int
 	GID   int
+	RPCArgs
 }
 
 type MoveReply struct {
@@ -64,6 +74,7 @@ type MoveReply struct {
 
 type QueryArgs struct {
 	Num int // desired config number
+	RPCArgs
 }
 
 type QueryReply struct {

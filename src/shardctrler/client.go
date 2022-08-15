@@ -4,7 +4,11 @@ package shardctrler
 // Shardctrler clerk.
 //
 
-import "6.824/labrpc"
+import (
+	"6.824/labrpc"
+	"strconv"
+	"sync"
+)
 import "time"
 import "crypto/rand"
 import "math/big"
@@ -12,6 +16,10 @@ import "math/big"
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// Your data here.
+
+	clientId  string
+	commandId int
+	mu        sync.Mutex
 }
 
 func nrand() int64 {
@@ -25,6 +33,8 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// Your code here.
+	ck.clientId = strconv.FormatInt(nrand(), 10)
+	ck.commandId = 0
 	return ck
 }
 
@@ -32,13 +42,21 @@ func (ck *Clerk) Query(num int) Config {
 	args := &QueryArgs{}
 	// Your code here.
 	args.Num = num
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+	args.ClientID = ck.clientId
+	ck.commandId += 1
+	args.CommandIdx = ck.commandId
 	for {
 		// try each known server.
 		for _, srv := range ck.servers {
 			var reply QueryReply
 			ok := srv.Call("ShardCtrler.Query", args, &reply)
-			if ok && reply.WrongLeader == false {
+			if ok && reply.WrongLeader == false && reply.Err == OK {
 				return reply.Config
+			} else if reply.Err == ErrRedo {
+				ck.commandId += 1
+				args.CommandIdx = ck.commandId
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -49,13 +67,17 @@ func (ck *Clerk) Join(servers map[int][]string) {
 	args := &JoinArgs{}
 	// Your code here.
 	args.Servers = servers
-
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+	args.ClientID = ck.clientId
+	ck.commandId += 1
+	args.CommandIdx = ck.commandId
 	for {
 		// try each known server.
 		for _, srv := range ck.servers {
 			var reply JoinReply
 			ok := srv.Call("ShardCtrler.Join", args, &reply)
-			if ok && reply.WrongLeader == false {
+			if ok && reply.WrongLeader == false && reply.Err != ErrTimeout {
 				return
 			}
 		}
@@ -67,13 +89,17 @@ func (ck *Clerk) Leave(gids []int) {
 	args := &LeaveArgs{}
 	// Your code here.
 	args.GIDs = gids
-
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+	args.ClientID = ck.clientId
+	ck.commandId += 1
+	args.CommandIdx = ck.commandId
 	for {
 		// try each known server.
 		for _, srv := range ck.servers {
 			var reply LeaveReply
 			ok := srv.Call("ShardCtrler.Leave", args, &reply)
-			if ok && reply.WrongLeader == false {
+			if ok && reply.WrongLeader == false && reply.Err != ErrTimeout {
 				return
 			}
 		}
@@ -86,13 +112,17 @@ func (ck *Clerk) Move(shard int, gid int) {
 	// Your code here.
 	args.Shard = shard
 	args.GID = gid
-
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+	args.ClientID = ck.clientId
+	ck.commandId += 1
+	args.CommandIdx = ck.commandId
 	for {
 		// try each known server.
 		for _, srv := range ck.servers {
 			var reply MoveReply
 			ok := srv.Call("ShardCtrler.Move", args, &reply)
-			if ok && reply.WrongLeader == false {
+			if ok && reply.WrongLeader == false && reply.Err != ErrTimeout {
 				return
 			}
 		}
