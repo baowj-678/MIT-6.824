@@ -55,9 +55,11 @@ func (ck *Clerk) Get(key string) string { // TODO Get需要发给Leader吗？
 	// You will have to modify this function.
 	ck.commandId += 1
 	request := GetArgs{
-		Key:       key,
-		CommandId: ck.commandId,
-		ClientId:  ck.clientId,
+		Key: key,
+		RPCArgs: RPCArgs{
+			CommandId: ck.commandId,
+			ClientId:  ck.clientId,
+		},
 	}
 	reply := GetReply{}
 	server := ck.PickLeaderServer(false, -1)
@@ -103,11 +105,13 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
 	ck.commandId += 1
 	request := PutAppendArgs{
-		Key:       key,
-		Value:     value,
-		Op:        op,
-		CommandId: ck.commandId,
-		ClientId:  ck.clientId,
+		Key:   key,
+		Value: value,
+		Op:    op,
+		RPCArgs: RPCArgs{
+			CommandId: ck.commandId,
+			ClientId:  ck.clientId,
+		},
 	}
 	reply := PutAppendReply{}
 	server := ck.PickLeaderServer(false, -1)

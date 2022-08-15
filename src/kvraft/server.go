@@ -48,6 +48,7 @@ type KVServer struct {
 	waitChannel        map[string]chan ChReply
 	clientMaxCommandId map[string]int
 	lastApplied        int
+	lastAppliedTerm    int
 }
 
 // TODO Get不用redoError
@@ -69,13 +70,13 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			DPrintf("Server-Get(%v): CommadId(%v) from ClientId(%v) has done", kv.me, op.CommandId, op.ClientId)
 			reply.Err = ErrReDo
 			kv.mu.Unlock()
-			DPrintf("Server-Get(%v): reply(%v), value(%v)", kv.me, reply.Err, reply.Value)
+			DPrintf("Server-Get(%v): reply(%v), value(%v), CommadId(%v) from ClientId(%v)", kv.me, reply.Err, reply.Value, op.CommandId, op.ClientId)
 			return
 		}
 	}
 	DPrintf("Server-Get(%v): start, CommadId(%v) from ClientId(%v)", kv.me, op.CommandId, op.ClientId)
-	_, _, isLeader := kv.rf.Start(op)
-	DPrintf("Server-Get(%v): after start, CommadId(%v) from ClientId(%v)", kv.me, op.CommandId, op.ClientId)
+	index, term, isLeader := kv.rf.Start(op)
+	DPrintf("Server-Get(%v): after start, CommadId(%v) from ClientId(%v), term(%v), index(%v)\n", kv.me, op.CommandId, op.ClientId, term, index)
 	kv.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -89,19 +90,14 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		select {
 		case rep := <-ch:
 			kv.mu.Lock()
-			delete(kv.waitChannel, opId)
+			kv.delAndCloseCh(opId)
 			kv.mu.Unlock()
-			close(ch)
 			DPrintf("Server-Get(%v): get response, CommandId(%v) from ClientId(%v)", kv.me, op.CommandId, op.ClientId)
 			reply.Err = rep.Err
 			reply.Value = rep.Value
 		case <-ctx.Done():
 			kv.mu.Lock()
-			_, exist := kv.waitChannel[opId]
-			if exist {
-				delete(kv.waitChannel, opId)
-				close(ch)
-			}
+			kv.delAndCloseCh(opId)
 			kv.mu.Unlock()
 			DPrintf("Server-Get(%v): timeout, CommandId(%v) from ClientId(%v)", kv.me, op.CommandId, op.ClientId)
 			reply.Err = ErrTimeOut
@@ -109,7 +105,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	} else {
 		reply.Err = ErrWrongLeader
 	}
-	DPrintf("Server-Get(%v): reply(%v), value(%v)", kv.me, reply.Err, reply.Value)
+	DPrintf("Server-Get(%v): reply(%v), value(%v), CommandId(%v) from ClientId(%v)", kv.me, reply.Err, reply.Value, op.CommandId, op.ClientId)
 	return
 }
 
@@ -132,12 +128,13 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			DPrintf("Server-PutAppend(%v): CommandId(%v) from ClientId(%v) has done", kv.me, op.CommandId, op.ClientId)
 			reply.Err = ErrReDo
 			kv.mu.Unlock()
-			DPrintf("Server-PutAppend(%v): reply(%v)", kv.me, reply.Err)
+			DPrintf("Server-PutAppend(%v): reply(%v), CommandId(%v) from ClientId(%v)", kv.me, reply.Err, op.CommandId, op.ClientId)
 			return
 		}
 	}
 	DPrintf("Server-PutAppend(%v): start, CommandId(%v) from ClientId(%v)", kv.me, op.CommandId, op.ClientId)
-	index, _, isLeader := kv.rf.Start(op)
+	index, term, isLeader := kv.rf.Start(op)
+	DPrintf("Server-PutAppend(%v): after start, CommadId(%v) from ClientId(%v), term(%v), index(%v)\n", kv.me, op.CommandId, op.ClientId, term, index)
 	kv.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -151,18 +148,13 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		select {
 		case rep := <-ch:
 			kv.mu.Lock()
-			delete(kv.waitChannel, opId)
+			kv.delAndCloseCh(opId)
 			kv.mu.Unlock()
-			close(ch)
 			DPrintf("Server-PutAppend(%v): get response, CommandId(%v) from ClientId(%v)", kv.me, op.CommandId, op.ClientId)
 			reply.Err = rep.Err
 		case <-ctx.Done():
 			kv.mu.Lock()
-			_, exist := kv.waitChannel[opId]
-			if exist {
-				delete(kv.waitChannel, opId)
-				close(ch)
-			}
+			kv.delAndCloseCh(opId)
 			kv.mu.Unlock()
 			DPrintf("Server-PutAppend(%v): timeout, CommandId(%v) from ClientId(%v)", kv.me, op.CommandId, op.ClientId)
 			reply.Err = ErrTimeOut
@@ -170,7 +162,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	} else {
 		reply.Err = ErrWrongLeader
 	}
-	DPrintf("Server-PutAppend(%v): reply(%v)", kv.me, reply.Err)
+	DPrintf("Server-PutAppend(%v): reply(%v), CommandId(%v) from ClientId(%v), term(%v), index(%v)\n", kv.me, reply.Err, op.CommandId, op.ClientId, term, index)
 	return
 }
 
@@ -237,6 +229,13 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	return kv
 }
 
+func (kv *KVServer) delAndCloseCh(key string) {
+	if ch, ok := kv.waitChannel[key]; ok {
+		delete(kv.waitChannel, key)
+		close(ch)
+	}
+}
+
 func (kv *KVServer) doOp(op Op) (bool, ChReply) {
 	rep := ChReply{
 		Err:   OK,
@@ -290,24 +289,31 @@ func (kv *KVServer) applier() {
 	DPrintf("Server-applier(%v): Start", kv.me)
 	for !kv.killed() {
 		msg := <-kv.applyCh
-		kv.mu.Lock()
 		if msg.SnapshotValid {
 			// install snapshot
+			kv.mu.Lock()
 			kv.ReadSnapshotFromRaft(msg.Snapshot)
 			kv.mu.Unlock()
 			DPrintf("Server-applier(%v): Snapshot", kv.me)
 		} else {
 			// apply entry
+			kv.mu.Lock()
 			_, val := kv.doOp(msg.Command.(Op))
 			DPrintf("Server-applier(%v): Command, CommandId(%v) from ClientId(%v), applyIndex(%v)", kv.me, msg.Command.(Op).CommandId, msg.Command.(Op).ClientId, msg.CommandIndex)
 			kv.lastApplied = msg.CommandIndex
+			kv.lastAppliedTerm = msg.CommandTerm
 			// reply channel
 			opId := msg.Command.(Op).ClientId + strconv.Itoa(msg.Command.(Op).CommandId)
 			ch, exist := kv.waitChannel[opId]
-			delete(kv.waitChannel, opId)
-			kv.mu.Unlock()
 			if exist {
-				ch <- val
+				delete(kv.waitChannel, opId)
+			}
+			kv.mu.Unlock()
+			// TODO optimize, thread
+			if exist {
+				go func() {
+					ch <- val
+				}()
 			}
 		}
 	}
@@ -324,6 +330,7 @@ func (kv *KVServer) Snapshot() {
 				w := new(bytes.Buffer)
 				e := labgob.NewEncoder(w)
 				e.Encode(kv.lastApplied)
+				e.Encode(kv.lastAppliedTerm)
 				e.Encode(kv.kvDatabase)
 				e.Encode(kv.clientMaxCommandId)
 				data := w.Bytes()
@@ -340,16 +347,19 @@ func (kv *KVServer) ReadSnapshotFromRaft(snapshot []byte) {
 
 	r := bytes.NewBuffer(snapshot)
 	d := labgob.NewDecoder(r)
-	var lastIncludeIndex int
+	var lastIncludedIndex int
+	var lastIncludedTerm int
 	var state map[string]string
 	var m map[string]int
-	if d.Decode(&lastIncludeIndex) != nil ||
+	if d.Decode(&lastIncludedIndex) != nil ||
+		d.Decode(&lastIncludedTerm) != nil ||
 		d.Decode(&state) != nil ||
 		d.Decode(&m) != nil {
 	} else {
-		kv.lastApplied = lastIncludeIndex
+		kv.lastApplied = lastIncludedIndex
+		kv.lastAppliedTerm = lastIncludedTerm
 		kv.kvDatabase = state
 		kv.clientMaxCommandId = m
-		DPrintf("ReadSnapshotFromRaft(%v): lastApplied(%v)", kv.me, kv.lastApplied)
+		DPrintf("ReadSnapshotFromRaft(%v): lastApplied(%v), lastAppliedTerm(%v)\n", kv.me, kv.lastApplied, kv.lastAppliedTerm)
 	}
 }
