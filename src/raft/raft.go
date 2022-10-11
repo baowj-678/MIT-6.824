@@ -174,7 +174,7 @@ func (rf *Raft) GetState() (int, bool) {
 //
 // save Raft's persistent state to stable storage. [No Lock]
 // where it can later be retrieved after a crash and restart.
-// see paper's Figure 2 for a description of what should be persistent.
+// see paper's Figure 2 for a description of what should be persistent.TODO persist调用时机优化
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	w := new(bytes.Buffer)

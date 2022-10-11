@@ -42,6 +42,19 @@ type Op struct {
 	// Your data here.
 }
 
+func (cfg *Config) Copy() *Config {
+	shards := [NShards]int{}
+	shards = cfg.Shards
+	group := map[int][]string{}
+	mapCopy(cfg.Groups, group)
+	tmp := Config{
+		Num:    cfg.Num,
+		Shards: shards,
+		Groups: group,
+	}
+	return &tmp
+}
+
 func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
 	// Your code here.
 	DPrintf("Join(%v): args(%v)\n", sc.me, args)
@@ -120,7 +133,7 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 	}
 	tmp := sc.GetReply(index, ch, "Query").(QueryReply)
 	reply.Err = tmp.Err
-	reply.Config = tmp.Config
+	reply.Config = *tmp.Config.Copy()
 }
 
 //
@@ -171,7 +184,7 @@ func (sc *ShardCtrler) OpHandler(args interface{}) *Config {
 	// set new config num
 	configNew.Num = configLatest.Num + 1
 	// copy old replica groups
-	sc.mapCopy(configLatest.Groups, configNew.Groups)
+	mapCopy(configLatest.Groups, configNew.Groups)
 	// copy old shards
 	configNew.Shards = configLatest.Shards
 
@@ -248,8 +261,8 @@ func (sc *ShardCtrler) RPCHandler(op *Op) (bool, string, chan *Config) {
 	return true, key, ch
 }
 
-func (sc *ShardCtrler) mapCopy(src map[int][]string, dst map[int][]string) {
-	DPrintf("mapCopy(%v)\n", sc.me)
+func mapCopy(src map[int][]string, dst map[int][]string) {
+	DPrintf("mapCopy\n")
 	for key, value := range src {
 		servers := make([]string, len(value))
 		copy(servers, value)
